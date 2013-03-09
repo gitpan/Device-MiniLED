@@ -2,16 +2,16 @@
 use ExtUtils::MakeMaker;
 WriteMakefile
 (
-  'PL_FILES' => {},
-  'INSTALLDIRS' => 'site',
-  'NAME' => 'Device::MiniLED',
-  'EXE_FILES' => [],
-  'VERSION_FROM' => 'lib/Device/MiniLED.pm',
-  'PREREQ_PM' => {
-                   'Test::More' => 0,
-                   'POSIX' => 0,
-                   'Win32::SerialPort' => 0,
-                   'Carp' => 0
-                 }
-)
+          'NAME' => 'Device::MiniLED',
+          'VERSION_FROM' => 'lib/Device/MiniLED.pm',
+          'PREREQ_PM' => {
+                           'Carp' => 0,
+                           'Device::SerialPort' => 0,
+                           'POSIX' => 0,
+                           'Test::More' => 0
+                         },
+          'INSTALLDIRS' => 'site',
+          'EXE_FILES' => [],
+          'PL_FILES' => {}
+        )
 ;

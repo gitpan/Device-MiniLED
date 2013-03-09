@@ -4,7 +4,7 @@
       "Kerry Schwab <sales@brightledsigns.com>"
    ],
    "dynamic_config" : 1,
-   "generated_by" : "Module::Build version 0.4003, CPAN::Meta::Converter version 2.120921",
+   "generated_by" : "Module::Build version 0.4003, CPAN::Meta::Converter version 2.112621",
    "license" : [
       "artistic_2"
    ],
@@ -16,26 +16,26 @@
    "prereqs" : {
       "build" : {
          "requires" : {
-            "Test::More" : "0"
+            "Test::More" : 0
          }
       },
       "configure" : {
          "requires" : {
-            "Module::Build" : "0"
+            "Module::Build" : 0
          }
       },
       "runtime" : {
          "requires" : {
-            "Carp" : "0",
-            "POSIX" : "0",
-            "Win32::SerialPort" : "0"
+            "Carp" : 0,
+            "Device::SerialPort" : 0,
+            "POSIX" : 0
          }
       }
    },
    "provides" : {
       "Device::MiniLED" : {
          "file" : "lib/Device/MiniLED.pm",
-         "version" : "1.00"
+         "version" : "1.01"
       },
       "Device::MiniLED::Clipart" : {
          "file" : "lib/Device/MiniLED.pm",
@@ -72,5 +72,5 @@
          "http://www.perlfoundation.org/artistic_license_2_0"
       ]
    },
-   "version" : "1.00"
+   "version" : "1.01"
 }
