@@ -30,7 +30,5 @@ my $builder = Module::Build->new(
       
     },
     add_to_cleanup     => [ 'Device-MiniLED-*' ],
-    create_makefile_pl => 'traditional',
 );
-
 $builder->create_build_script();

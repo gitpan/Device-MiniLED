@@ -5,7 +5,7 @@ use Carp;
 use strict;
 use warnings;
 use 5.005;
-$Device::MiniLED::VERSION="1.01";
+$Device::MiniLED::VERSION="1.02";
 #
 # Selectively use Win32::Serial port if Windows OS detected,
 # otherwise, use Device::SerialPort

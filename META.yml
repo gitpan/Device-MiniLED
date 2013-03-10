@@ -16,7 +16,7 @@ name: Device-MiniLED
 provides:
   Device::MiniLED:
     file: lib/Device/MiniLED.pm
-    version: 1.01
+    version: 1.02
   Device::MiniLED::Clipart:
     file: lib/Device/MiniLED.pm
     version: 0
@@ -44,4 +44,4 @@ requires:
   POSIX: 0
 resources:
   license: http://www.perlfoundation.org/artistic_license_2_0
-version: 1.01
+version: 1.02
