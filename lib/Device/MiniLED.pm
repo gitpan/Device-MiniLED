@@ -1,14 +1,20 @@
 #
-#
 package Device::MiniLED;
 use Carp;
 use strict;
 use warnings;
 use 5.005;
-$Device::MiniLED::VERSION="1.02";
+$Device::MiniLED::VERSION="1.03";
 #
-# Selectively use Win32::Serial port if Windows OS detected,
-# otherwise, use Device::SerialPort
+# Shared Constants / Globals
+#
+our %EFFECTMAP = (
+        "hold" => 0x41, "scroll" => 0x42,
+        "snow" => 0x43, "flash" => 0x44,
+        "hold+flash" => 0x45
+);
+#
+# Use Win32::Serial port on Windows otherwise, use Device::SerialPort
 #
 BEGIN 
 {
@@ -37,10 +43,10 @@ sub new {
         croak("Invalue value for [devicetype]: \"$params{devicetype}\"");
         return undef;
     }
-    $this->{imagefactory}=Device::MiniLED::ImageFactory->new(
+    $this->{imagefactory}=Device::MiniLED::Factory->new(
          devicetype=> $params{devicetype}
     );
-    $this->{msgfactory}=Device::MiniLED::MsgFactory->new(
+    $this->{msgfactory}=Device::MiniLED::Factory->new(
          devicetype=> $params{devicetype}
     );
     $this->{device} = $params{device};
@@ -108,7 +114,7 @@ sub addIcon {
 sub addMsg {
     my($this) = shift;
     my(%params)=@_;
-    if ($this->_msgfactory->count >= 8) {
+    if ($this->_msgfactory->{msgcount} >= 8) {
         carp("Maximum message count of 8 is already". 
                " reached, discarding new message");
         return undef;
@@ -117,25 +123,38 @@ sub addMsg {
         croak("Parameter [data] must be present");
         return undef;
     }
-    if (!$params{effect}) {
-        croak("Parameter [effect] must be present");
-        return undef;
+    if (!defined($params{speed})) {
+        $params{speed}=4;
     }
-    if (!$params{speed}) {
-        croak("Parameter [speed] must be present");
-        return undef;
-    }
-    if ($params{speed} < 1 or $params{speed} > 5) {
+    if ($params{speed} !~ /^[1-5]$/) {
         croak("Parameter [speed] must be between 1 (slowest) and 5 (fastest)");
         return undef;
+    } 
+    # effect
+    if (!defined($params{effect})) {
+        $params{effect}="scroll";
+    } else {
+        my @effects=keys(%Device::MiniLED::EFFECTMAP);
+        if (!grep(/^$params{effect}$/,@effects)) {
+            croak("Invalid effect value [$params{effect}]");
+            return undef;
+        }
+    }
+    if (exists($params{slot})) {
+        if ($params{slot} !~ /^[1-8]$/) {
+            croak("Parameter [slot] must be a value from 1 to 8");
+        } else {
+            $this->_msgfactory->slot($params{slot});
+        } 
+    } else {
+        $params{slot}=$this->_msgfactory->slot;
     }
     my $mobj=$this->_msgfactory->msg(
         %params,
         devicetype => $this->{devicetype},
         imagefactory =>$this->_imagefactory,
     );
-    return $this->_msgfactory->count;
-
+    return $this->_msgfactory->{msgcount};
 }
 sub _connect {
     my $this=shift;
@@ -181,17 +200,20 @@ sub send {
     } else {
         $baudrate="38400";
     }
+    # packetdelay is the # of seconds to sleep between sending packets over 
+    # the serial port. Can be a floating point number. Default is 0.2 seconds
     my $packetdelay;
     if (defined($params{packetdelay})) {
-       if ($params{packetdelay} > 0 && $params{packetdelay} =~
-                   /^([+-]?)(?=\d|\.\d)\d*(\.\d)?([Ee]([+-]?\d+))?$/) {
+       if ($params{packetdelay} > 0 && 
+              $params{packetdelay} =~ m#^\d*\.{0,1}\d*$#) {  
            $packetdelay=$params{packetdelay};
        } else {
            croak('Invalid value ['.$params{packetdelay}
                  . '] for parameter packetdelay');
        }
     } else {
-       $packetdelay=0.2;
+       # anything below this seems to overrun the sign  
+       $packetdelay=0.20;
     }
     my $serial;
     if (defined $params{debug}) {
@@ -205,7 +227,7 @@ sub send {
     # send an initial null, wakes up the sign
     $serial->write(pack("C",0x00));
     # sleep a short while to avoid overrunning sign
-    select(undef,undef,undef,0.1);
+    select(undef,undef,undef,$packetdelay);
     my $count=0;
     foreach my $msgobj (@{$this->_msgfactory->objects}) {
         # get the data
@@ -213,8 +235,9 @@ sub send {
         my @packets=$msgobj->encode(devicetype => $params{devicetype});
         foreach my $data (@packets) {
             $serial->write($data);
-            # sleep a short while to avoid overrunning sign
+            # logic so we don't sleep after the last packet
             select(undef,undef,undef,$packetdelay);
+            # sleep a short while to avoid overrunning sign
         }
     }
     foreach my $data ($this->_imagefactory->packets()) {
@@ -222,20 +245,41 @@ sub send {
           # sleep a short while to avoid overrunning sign
           select(undef,undef,undef,$packetdelay);
     }
-    my %NUMMAP = (
-        1 => 0x01, 2 => 0x03,
-        3 => 0x07, 4 => 0x0f,
-        5 => 0x1f, 6 => 0x3f,
-        7 => 0x7f, 8 => 0xff,
+    my %BITVAL = (
+        1 => 1, 2 => 2,
+        3 => 4, 4 => 8,
+        5 => 16, 6 => 32,
+        7 => 64, 8 => 128
     );
-    my $runit=pack("C*",(0x02,0x33,$NUMMAP{$count}));
-    select(undef,undef,undef,0.5);
-    $serial->write($runit);
+    my $bits=0;
+    my @slots;
+    if (exists($params{showslots})) {
+       # strip spaces
+       $params{showslots} =~ s#\s##g;
+       foreach my $one (split(/\,/,$params{showslots})) {
+           if ($one !~ /^[1-8]$/) {
+               croak("Invalid value [$one] in parameter [showslots]");
+           } else {
+               push(@slots,$one);
+           }
+       }
+    } else {
+       @slots = keys %{$this->_msgfactory->{'msgslots'}};
+    }
+    foreach my $num (@slots) {
+        $bits += $BITVAL{$num};
+    }
+    if ($bits != 0) {
+        my $runit=pack("C*",(0x02,0x33,$bits));
+        #select(undef,undef,undef,$packetdelay);
+        $serial->write($runit);
+    }
     if (defined $params{debug}) {
         return $serial->dump();
     }
 }
-package Device::MiniLED::MsgFactory;
+package Device::MiniLED::Factory;
+use Carp;
 our @CARP_NOT = qw(Device::MiniLED);
 sub new {
     my $that  = shift;
@@ -246,161 +290,55 @@ sub new {
     foreach my $key (keys(%params)) {
         $this->{$key}=$params{$key};
     }
-    $this->{count}=0;
+    $this->{msgcount}=0;
+    $this->{imgcount}=0;
+    $this->{chunkcount}=0;
+    $this->{chunkcache}={};
+    $this->{chunks}=[];
+    $this->{msgslots}=();
+    $this->{objects}=[];
     return $this;
 }
+sub slot {
+    my $this=shift;
+    my $slot;
+    $slot=shift;
+    my $return;
+    if (!defined($slot)) {
+         # a slot wasn't specified, so issue the next available
+         for (1..8) {
+             if (!exists($this->{msgslots}{$_})) {
+                 $this->{msgslots}->{$_}=1;
+                 $return=$_;
+                 last;
+             }
+         }
+    } else {
+        if (exists($this->{msgslots}->{$slot})) {
+            croak("Slot [$slot] already in use\n");
+        } else {
+            $this->{msgslots}->{$slot}=1;
+            $return=$slot;
+        }
+    }
+    return $return;
+}
+
 sub msg {
     my $this=shift;
     my(%params) = @_;
     my $msg=Device::MiniLED::Msg->new(%params, factory => $this);
     push(@{$this->{objects}},$msg);
-    $this->{count}++;
-    my $count=$this->{count};
-    $msg->{number}=$this->{count};
+    $this->{msgcount}++;
+    my $msgcount=$this->{msgcount};
+    $msg->{number}=$this->{msgcount};
     return $msg;
-}
-sub count {
-    my $this=shift;
-    my $count=$this->{count};
-    return $this->{count};
 }
 sub objects {
     my $this=shift;
     return $this->{objects};
 }
-#
-# object to hold a message and it's associated data and parameters
-# 
-package Device::MiniLED::Msg;
-our @CARP_NOT = qw(Device::MiniLED);
-sub new {
-    my $that  = shift;
-    my $class = ref($that) || $that;
-    my(%params) = @_;
-    my $this = {};
-    bless $this, $class;
-    foreach my $key (keys(%params)) {
-        $this->{$key}=$params{$key};
-    }
-    return $this;
-}
-sub factory {
-    my $this = shift;
-    return $this->{factory};
-}
-sub processTags {
-    my $this = shift;
-    my $type=$this->{devicetype}; 
-    my $msgdata=$this->{data};
-    # font tags
-    
-    my ($normal,$flash);
-    if ($type eq "badge") {
-        $normal=pack("C*",0xff,0x80);
-        $flash=pack("C*",0xff,0x81);
-    } else { 
-        $normal=pack("C*",0xff,0x8f);
-        $flash=pack("C*",0xff,0x8f);
-    }
-    $msgdata =~ s/<f:normal>/$normal/g;
-    $msgdata =~ s/<f:flash>/$flash/g;
-    # icon tags
-    my $factory=$this->{imagefactory};
-    while ($msgdata =~ /(<i:\d+>)/g) {
-        my $icontag=$1;
-        my $substitute=$factory->icontag_data($icontag);
-        $msgdata=~s/$icontag/$substitute/g;
-    }
-    # pix tags
-    while ($msgdata =~ /(<p:\d+>)/g) {
-        my $pixtag=$1;
-        my $substitute=$factory->pixtag_data($pixtag);
-        $msgdata=~s/$pixtag/$substitute/g;
-    }
-    $this->{data}=$msgdata;
-    return $msgdata;
-}
-sub encode {
-    my $this = shift;
-    my(%params)=@_;
-    my $number=$this->{number};
-    my $msgdata=$this->processTags();
-    my %EFMAP = (
-            "hold" => 0x41, "scroll" => 0x42,
-            "snow" => 0x43, "flash" => 0x44,
-            "hold+flash" => 0x45
 
-    );
-    my %SPMAP = (
-            1 => 0x31, 2 => 0x32, 3 => 0x33,
-            4 => 0x34, 5 => 0x35
-    );
-    my $effect=$EFMAP{$this->{effect}};
-    if (! $effect ) {
-            $effect=0x35;
-    }
-    my $speed=$SPMAP{$this->{speed}};
-    if (! $speed ) {
-            $speed=0x35;
-    }
-    my $alength=length($msgdata);
-    $msgdata=pack("Z255",$msgdata);
-    my @encoded;
-    my $end;
-    my @endmem=(0x00,0x40,0x80,0xc0);
-    foreach my $i (0..3) {
-        my $start=0x06+($number-1);
-        my $chunk;
-        if ($i == 0) {
-            $chunk=substr($msgdata,0,60);
-        } else {
-            my $offset=60+(64*($i-1));
-            $chunk=substr($msgdata,$offset,64);
-        }
-        $end=$endmem[$i];
-        my $csize=length($chunk)+2;
-        my(@tosend)=(0x02,0x31,$start,$end);
-        if ($i == 0) {
-             push(@tosend,($speed,0x31,$effect,$alength));
-        }
-        foreach my $char (split(//,$chunk)) {
-            push(@tosend,ord($char));
-        }
-        my $aend=$#tosend;
-        my @slice=@tosend[1..$#tosend];
-        my $total;
-        foreach my $one (@slice) { 
-              $total+=$one;
-            my $hextotal = sprintf("0x%x",$total);
-        }
-        my $mod=$total % 256;
-        my $hmod=sprintf("0x%x",$mod);
-
-        push(@tosend,$mod);
-        my $packed=pack("C*",@tosend);
-        push(@encoded,$packed);
-    }
-    return @encoded;
-}
-
-package Device::MiniLED::ImageFactory;
-our @CARP_NOT = qw(Device::MiniLED);
-
-sub new {
-    my $that  = shift;
-    my $class = ref($that) || $that;
-    my(%params) = @_;
-    my $this = {};
-    bless $this, $class;
-    foreach my $key (keys(%params)) {
-        $this->{$key}=$params{$key};
-    }
-    $this->{count}=0;
-    $this->{chunkcount}=0;
-    $this->{chunkcache}={};
-    $this->{chunks}=[];
-    return $this;
-}
 sub pixmap {
     my $this=shift;
     my(%params) = @_;
@@ -410,8 +348,8 @@ sub pixmap {
         factory => $this
     );
     push(@{$this->{pixobjects}},$pixmap);
-    $this->{count}++;
-    $pixmap->{number}=$this->{count};
+    $this->{imgcount}++;
+    $pixmap->{number}=$this->{imgcount};
     return $pixmap;
 }
 sub icon {
@@ -423,8 +361,8 @@ sub icon {
         factory => $this
     );
     push(@{$this->{iconobjects}},$icon);
-    $this->{count}++;
-    $icon->{number}=$this->{count};
+    $this->{imgcount}++;
+    $icon->{number}=$this->{imgcount};
     return $icon;
 }
 sub store_icontag {
@@ -443,11 +381,6 @@ sub icontag_data {
     }
 }
 
-sub count {
-    my $this=shift;
-    my $count=$this->{count};
-    return $this->{count};
-}
 sub pixobjects {
     my $this=shift;
     return $this->{pixobjects};
@@ -462,10 +395,8 @@ sub add_chunk {
     my $chunk = $params{chunk};
     my $type =  $params{type};
     my $return;
-    #
     # if we've seen a chunk like this before, pass back the existing
     # reference instead of storing a new image
-    #
     if (exists($this->{chunkcache}{$chunk})) {
         $return=$this->{chunkcache}{$chunk};
     } else {
@@ -480,11 +411,13 @@ sub add_chunk {
         }
         push(@{$this->{chunks}},$chunk);
         my $msgref;
-        if ($type eq "pix") {
+        if ($type eq "pixmap") {
             $msgref=0x8000+$sequence;
         } elsif ($type eq "icon") {
             $msgref=0xc000+$sequence;
-        }
+        } else {
+            die("argh!\n");
+         }
         $return=pack("n",$msgref);
         $this->{chunkcache}{$chunk}=$return;
     }
@@ -544,20 +477,234 @@ sub pixtag_data {
          return '';
     }
 }
-
 #
-# object to hold a pixmap and it's associated data and parameters
+# object to hold a message and it's associated data and parameters
 # 
-package Device::MiniLED::Pixmap;
-our @CARP_NOT = qw(Device::MiniLED);
-use POSIX qw (ceil);
+package Device::MiniLED::Msg;
 use Carp;
+our @CARP_NOT = qw(Device::MiniLED);
 sub new {
     my $that  = shift;
     my $class = ref($that) || $that;
     my(%params) = @_;
     my $this = {};
     bless $this, $class;
+    foreach my $key (keys(%params)) {
+        $this->{$key}=$params{$key};
+    }
+    return $this;
+}
+sub factory {
+    my $this = shift;
+    return $this->{factory};
+}
+sub processTags {
+    my $this = shift;
+    my $type=$this->{devicetype}; 
+    my $msgdata=$this->{data};
+    # font tags
+    
+    my ($normal,$flash);
+    if ($type eq "badge") {
+        $normal=pack("C*",0xff,0x80);
+        $flash=pack("C*",0xff,0x81);
+    } else { 
+        $normal=pack("C*",0xff,0x8f);
+        $flash=pack("C*",0xff,0x8f);
+    }
+    $msgdata =~ s/<f:normal>/$normal/g;
+    $msgdata =~ s/<f:flash>/$flash/g;
+    # icon tags
+    my $factory=$this->{imagefactory};
+    while ($msgdata =~ /(<i:\d+>)/g) {
+        my $icontag=$1;
+        my $substitute=$factory->icontag_data($icontag);
+        $msgdata=~s/$icontag/$substitute/g;
+    }
+    # pix tags
+    while ($msgdata =~ /(<p:\d+>)/g) {
+        my $pixtag=$1;
+        my $substitute=$factory->pixtag_data($pixtag);
+        $msgdata=~s/$pixtag/$substitute/g;
+    }
+    $this->{data}=$msgdata;
+    return $msgdata;
+}
+sub encode {
+    my $this = shift;
+    my(%params)=@_;
+    my $number=$this->{number};
+    my $msgdata=$this->processTags();
+    my %SPMAP = (
+            1 => 0x31, 2 => 0x32, 3 => 0x33,
+            4 => 0x34, 5 => 0x35
+    );
+    my $effect=$Device::MiniLED::EFFECTMAP{$this->{effect}};
+
+    if (! $effect ) {
+            $effect=0x35;
+    }
+    my $speed=$SPMAP{$this->{speed}};
+    if (! $speed ) {
+            $speed=0x35;
+    }
+    my $alength=length($msgdata);
+    $msgdata=pack("Z255",$msgdata);
+    my @encoded;
+    my $end;
+    my @endmem=(0x00,0x40,0x80,0xc0);
+    my $slot=$this->{slot};
+    foreach my $i (0..3) {
+        my $start=0x06+($slot-1);
+        #my $start=0x06+($number-1);
+        my $chunk;
+        if ($i == 0) {
+            $chunk=substr($msgdata,0,60);
+        } else {
+            my $offset=60+(64*($i-1));
+            $chunk=substr($msgdata,$offset,64);
+        }
+        $end=$endmem[$i];
+        my $csize=length($chunk)+2;
+        my(@tosend)=(0x02,0x31,$start,$end);
+        if ($i == 0) {
+             push(@tosend,($speed,0x31,$effect,$alength));
+        }
+        foreach my $char (split(//,$chunk)) {
+            push(@tosend,ord($char));
+        }
+        my $aend=$#tosend;
+        my @slice=@tosend[1..$#tosend];
+        my $total;
+        foreach my $one (@slice) { 
+              $total+=$one;
+            my $hextotal = sprintf("0x%x",$total);
+        }
+        my $mod=$total % 256;
+        my $hmod=sprintf("0x%x",$mod);
+
+        push(@tosend,$mod);
+        my $packed=pack("C*",@tosend);
+        push(@encoded,$packed);
+    }
+    return @encoded;
+}
+#
+# parent object for Pixmap and Icon to derive from
+#
+#
+package Device::MiniLED::Image;
+use Carp;
+use POSIX qw (ceil);
+sub new {
+    my $that  = shift;
+    my $class = ref($that) || $that;
+    my(%params) = @_;
+    my $this = {};
+    bless $this, $class;
+    foreach my $key (keys(%params)) {
+        $this->{$key}=$params{$key};
+    }
+    return $this;
+}
+sub factory {
+    my $this = shift;
+    return $this->{factory};
+}
+sub loaddata {
+    my $this=shift();
+    my $devicetype=$this->{devicetype};
+    my $data=$this->{data};
+    $data=~s/[^01]//g;
+    # set tilesize, width, and height
+    my $tilesize;my $width;my $height;
+    if ($this->{objtype} eq "pixmap") {
+        $width=$this->{width};
+        $height=$this->{height};
+        if ($devicetype eq "sign") {
+            $tilesize=16;
+            $this->{packformat}="a32"
+        } elsif ($devicetype eq "badge") {
+            $tilesize=12;
+            $this->{packformat}="a24"
+        }
+    } elsif ($this->{objtype} eq "icon") {
+        if ($devicetype eq "sign") {
+            $tilesize=16;$width=32;$height=16;
+            $this->{packformat}="a64"
+        } elsif ($devicetype eq "badge") {
+            $tilesize=12;$width=24;$height=12;
+            $this->{packformat}="a48"
+        }
+    }
+    my $length=length($data);
+    my $expected=$width*$height;
+    if ($length < $width * $height) {
+         carp("Expected [$expected] bits, got [$length] bits...padding ".
+              "data with zeros");
+         $data.="0"x($expected-$length);
+    }
+    my $padding=$width%$tilesize?$tilesize-($width % $tilesize):0;
+    my $newwidth=$width+$padding;
+    # pad the image width to an equal multiple of the tilesize
+    my $tiles=ceil($width/$tilesize);
+    my $final;
+    foreach my $tile (1..$tiles) {
+        foreach my $row (1..$tilesize) {
+            my $rowstart=($row-1)*($width);
+            my $offset=$rowstart+(($tile-1)*$tilesize);
+            my $chunk;
+            my $chunkstart=(($tile-1) * $tilesize);
+            my $chunkend=$chunkstart+($tilesize);
+            if ($row <= $height) {
+                if ($chunkend <= $width) {
+                     $chunk=substr($data,$offset,$tilesize);
+                } else {
+                     $chunk=substr($data,$offset,$width-$chunkstart); 
+                     $chunk.="0"x($tilesize-length($chunk));
+                }
+            } else {
+                $chunk="0"x($tilesize);
+            }
+            #print "chunk [$chunk]\n";
+            $final.=pack("B16",$chunk);
+        }
+    }
+    $this->setmsg(data => $final);
+}
+sub setmsg {
+    my $this = shift;
+    my %params = @_;
+    my $data=$params{data};
+    my $devicetype=$this->{devicetype};
+    my $objtype=$this->{objtype};
+    my $msgref;
+    my $factory=$this->factory;
+    my $format=$this->{packformat};
+    foreach my $chunk (unpack("($format)*",$data)) {
+       $msgref.=$factory->add_chunk(chunk => $chunk, type => $objtype);
+    }
+    if ($objtype eq "pixmap") {
+        $factory->store_pixtag($this->get_pixtag,$msgref);
+    } elsif ($objtype eq "icon") {
+        $factory->store_icontag($this->get_icontag,$msgref);
+    }
+}
+#
+# object to hold a pixmap and it's associated data and parameters
+# 
+package Device::MiniLED::Pixmap;
+use Carp;
+our @ISA= qw (Device::MiniLED::Image);
+our @CARP_NOT = qw(Device::MiniLED);
+use Carp;
+sub new {
+    my $that  = shift;
+    my $class = ref($that) || $that;
+    my %params=@_;
+    my $this = Device::MiniLED::Image->new(%params);
+    $this->{'objtype'}='pixmap';
+    # fix - my(%params) = @_;
     foreach my $key (keys(%params)) {
         $this->{$key}=$params{$key};
     }
@@ -585,102 +732,27 @@ sub new {
         croak("Parameter [devicetype] must be present");
         return undef;
     }
-    # so now we have width, height, and some data
-    return $this;
-}
-sub factory {
-    my $this = shift;
-    return $this->{factory};
+    return (bless($this,$class));
 }
 sub get_pixtag {
     my $this=shift;
     my $number=$this->{number};
     return "<p:$number>";
 }
-sub loaddata { 
-    my $this=shift();
-    my $devicetype=$this->{devicetype};
-    my $width=$this->{width};
-    my $height=$this->{height};
-    my $input=$this->{data};
-    $input=~s/[^01]//g;
-    my $length=length($input);
-    my $expected=$width*$height;
-    if ($length < $width * $height) {
-         carp("Expected [$expected] bits, got [$length] bits...padding ".
-              "data with zeros");
-         $input.="0"x($expected-$length);
-    }
-    # 
-    # the input data is ordered in a "normal way", left-to-right, top-row to 
-    # bottom row the sign protocol, however, needs the data ordered with the 
-    # image first broken up into 16x16 pixel squares then ordered by reading 
-    # each "square" left-to-right, top-row to bottom row.
-    # 
-    my $tilesize;
-    if ($devicetype eq "sign") {
-        $tilesize=16;
-    } elsif ($devicetype eq "badge") {
-        $tilesize=12;
-    }
-    my $tiles=ceil($width/$tilesize);
-    my $final;
-    foreach my $tile (1..$tiles) {
-        foreach my $row (1..$tilesize) {
-            my $rowstart=($row-1)*($width);
-            my $offset=$rowstart+(($tile-1)*$tilesize);
-            my $chunk;
-            my $chunkstart=(($tile-1) * $tilesize);
-            my $chunkend=$chunkstart+($tilesize);
-            if ($row <= $height) {
-                if ($chunkend <= $width) {
-                     $chunk=substr($input,$offset,$tilesize);
-                } else {
-                     $chunk=substr($input,$offset,$width-$chunkstart); 
-                     $chunk.="0"x($tilesize-length($chunk));
-                }
-            } else {
-                $chunk="0"x($tilesize);
-            }
-            $final.=pack("B16",$chunk);
-        }
-    }
-    $this->setmsg(data => $final);
-}
-sub setmsg {
-    my $this = shift;
-    my %params = @_;
-    my $data=$params{data};
-    my $devicetype=$this->{devicetype};
-    my $msgref;
-    my $factory=$this->factory;
-    my $format;
-    if ($devicetype eq "badge") {
-       $format="a24";
-    } elsif ($devicetype eq "sign") {
-       $format="a32";
-    } 
-    foreach my $chunk (unpack("($format)*",$data)) {
-       $msgref.=$factory->add_chunk(chunk => $chunk, type => "pix");
-    }
-    $factory->store_pixtag($this->get_pixtag,$msgref);
-}
 #
 # object to hold a icon and it's associated data and parameters
 # 
 package Device::MiniLED::Icon;
-our @CARP_NOT = qw(Device::MiniLED);
-use POSIX qw (ceil);
 use Carp;
+our @ISA= qw (Device::MiniLED::Image);
+our @CARP_NOT = qw(Device::MiniLED);
 sub new {
     my $that  = shift;
     my $class = ref($that) || $that;
-    my(%params) = @_;
-    my $this = {};
+    my (%params)=@_;
+    my $this = Device::MiniLED::Image->new(%params);
+    $this->{'objtype'}='icon';
     bless $this, $class;
-    foreach my $key (keys(%params)) {
-        $this->{$key}=$params{$key};
-    }
     if (!defined($this->{data})) {
         croak("Parameter [data] must be present");
         return undef;
@@ -689,86 +761,16 @@ sub new {
         croak("Parameter [devicetype] must be present");
         return undef;
     }
-    return $this;
-}
-sub factory {
-    my $this = shift;
-    return $this->{factory};
+    return (bless($this,$class));
 }
 sub get_icontag {
     my $this=shift;
     my $number=$this->{number};
     return "<i:$number>";
 }
-sub loaddata { 
-    my $this=shift();
-    my $devicetype=$this->{devicetype};
-    my ($tilesize,$width,$height);
-    if ($devicetype eq "sign") {
-        $tilesize=16;$width=32;$height=16;
-    } elsif ($devicetype eq "badge") {
-        $tilesize=12;$width=24;$height=12;
-    }
-    my $input=$this->{data};
-    $input=~s/[^01]//g;
-    my $length=length($input);
-    my $expected=$width*$height;
-    if ($length < $width * $height) {
-         carp("Expected [$expected] bits, got [$length] bits...padding ".
-              "data with zeros");
-         $input.="0"x($expected-$length);
-    }
-    # 
-    # the input data is ordered in a "normal way", left-to-right, top-row to 
-    # bottom row the sign protocol, however, needs the data ordered with the 
-    # image first broken up into 16x16 iconel squares then ordered by reading 
-    # each "square" left-to-right, top-row to bottom row.
-    # 
-    my $tiles=ceil($width/$tilesize);
-    my $final;
-    foreach my $tile (1..$tiles) {
-        foreach my $row (1..$tilesize) {
-            my $rowstart=($row-1)*($width);
-            my $offset=$rowstart+(($tile-1)*$tilesize);
-            my $chunk;
-            my $chunkstart=(($tile-1) * $tilesize);
-            my $chunkend=$chunkstart+($tilesize);
-            if ($row <= $height) {
-                if ($chunkend <= $width) {
-                     $chunk=substr($input,$offset,$tilesize);
-                } else {
-                     $chunk=substr($input,$offset,$width-$chunkstart); 
-                     $chunk.="0"x($tilesize-length($chunk));
-                }
-            } else {
-                $chunk="0"x($tilesize);
-            }
-            $final.=pack("B16",$chunk);
-        }
-    }
-    $this->setmsg(data => $final);
-}
-sub setmsg {
-    my $this = shift;
-    my %params = @_;
-    my $data=$params{data};
-    my $devicetype=$this->{devicetype};
-    my $msgref;
-    my $factory=$this->factory;
-    my $format;
-    if ($devicetype eq "badge") {
-       $format="a48";
-    } elsif ($devicetype eq "sign") {
-       $format="a64";
-    } 
-    foreach my $chunk (unpack("($format)*",$data)) {
-       $msgref.=$factory->add_chunk(chunk => $chunk, type => "icon");
-    }
-    $factory->store_icontag($this->get_icontag,$msgref);
-}
 package Device::MiniLED::Clipart;
-our @CARP_NOT = qw(Device::MiniLED);
 use Carp;
+our @CARP_NOT = qw(Device::MiniLED);
 sub new {
     my $that  = shift;
     my $class = ref($that) || $that;
@@ -1161,6 +1163,7 @@ sub set {
 }
 
 package Device::MiniLED::SerialTest;
+use Carp;
 sub new {
     my $that  = shift;
     my $class = ref($that) || $that;
@@ -1185,15 +1188,15 @@ sub dump {
     return $this->{data};
 }
 
-
 1;
+
 =head1 NAME
 
 Device::MiniLED - send text and graphics to small LED badges and signs
  
 =head1 VERSION
 
-Version 1.00
+Version 1.03
 
 =head1 SYNOPSIS
 
@@ -1243,18 +1246,31 @@ Device::MiniLED is used to send text and graphics via RS232 to our smaller set o
 
 This family of devices support a maximum of 8 messages that can be sent to the sign.  These messages can consist of three different types of content, which can be mixed together in the same message..plain text, pixmap images, and 2-frame anmiated icons.
 
-The $sign->addMsg method has three required arguments...data, effect, and speed:
+The $sign->addMsg method has one required argument, data, It also has three optional arguments: effect, speed, and slot.
 
 =over 4
 
 =item
-B<data>:   The data to be sent to the sign. Plain text, optionally with $variables that reference pixmap images or animated icons
+B<data>:   (required) The data to be sent to the sign. Plain text, optionally with tags for fonts and $variables that reference pixmap images or animated icons.
+
+=over
 
 =item
-B<effect>: One of "hold", "scroll", "snow", "flash" or "hold+flash"
+B<font tags>: You can insert a font tag to create flashing text. The supported tags are &lt;f:normal&gt; and &lt;f:flash&gt. On the badges, these tags work as expected.  On the signs, either flag is actually just a toggle back and forth from flashing to normal.  If you use them in the right order, you won't notice. For example:
+  $sign->addMsg(
+      data => "Some <f:flash>flashing text<f:normal>. Neat, right?"
+  ); 
+
+=back
 
 =item
-B<speed>:  An integer from 1 to 5, where 1 is the slowest and 5 is the fastest 
+B<effect>: (optional, defaults to "scroll") One of "hold", "scroll", "snow", "flash" or "hold+flash"
+
+=item
+B<speed>:  (optional, defaults to "4") An integer from 1 to 5, where 1 is the slowest and 5 is the fastest 
+
+=item
+B<slot>:  (optional) An integer from 1 to 8, representing the message slots in the sign.  If you don't supply this, it will assign slot numbers automatically, in ascending order.
 
 =back
 
@@ -1266,10 +1282,54 @@ The addMsg method returns a number that indicates how many messages have been cr
            data => "Message number $_",
            effect => "scroll",
            speed => 5
-       )
+       );
        # on the ninth loop, $number will be undef, and a warning will be
        # generated
   }
+
+Assigning slots manually
+
+  my $sign=Device::MiniLED->new(devicetype => "sign");
+  $sign->addMsg(
+      data => "A msg in slot 3",
+      slot => 3
+  );
+  $sign->addMsg(
+      data => "A msg in slot 1",
+      slot => 1
+  );
+  $sign->addMsg(
+      data => "A msg in slot 5",
+      slot => 5
+  );
+  # even though we loaded a message in slot 3, the use of "showslots"
+  # below means that only the messages in slots 1 and 5 will be displayed
+  $sign->send(
+      device => "/dev/ttyUSB0",
+      showslots => "1,5"
+  );
+  # sleep for a minute...
+  sleep(60);
+  # now we'll have the sign show just what's in slot number 3.
+  $sign->send(
+      device => "/dev/ttyUSB0",
+      showslots => "3"
+  );
+  #
+  # note: if the sign already has messages in a slot, you can have a script
+  # that does nothing other than $sign->send (with the showslots parameter)
+  # to select which of them to  display on the sign.
+  #
+  # for example, you could preload messages in slots 1 through 7, with message
+  # 1 being "Happy Monday", 2 being "Happy Tuesday", and so forth.
+  # Then, on monday morning, your script could send:
+  # run $sign->send(device => 'COM1', showslots => "1"), and just the monday
+  # message would display on the sign
+  #
+  # For unknown reasons, however, the message slot selection buttons on the
+  # sign itself won't show stored messages.  They are there, and will be 
+  # displayed if you use the showslots parameter in $sign->send.
+  #
 
 =head2 $sign->addPix
 
@@ -1311,7 +1371,7 @@ helpful in generating these strings.
           "10001".
           "10001".
           "10001".
-          "11111".
+          "11111" 
   );
   # now use that in a message
   $sign->addMsg(
@@ -1375,17 +1435,31 @@ You can "roll your own" icons as well.
 
 The send method connects to the sign over RS232 and sends all the data accumulated from prior use of the $sign->addMsg method.  The only mandatory argument is 'device', denoting which serial device to send to.
 
-It supports two optional arguments, baudrate and packetdelay:
+It supports three optional arguments, showslots, baudrate and packetdelay:
 
 =over 4
 
 =item
-B<baudrate>: defaults to 38400, no real reason to use something other than the default, but it's there if you feel the need.  Must be a value that Device::Serialport or Win32::Serialport thinks is valid
+B<showslots>: 
+A string that is a comma separated list of the slot numbers that you want to display on the sign.  If you omit this, it will display the messages you just added with addMsg.  If you supply a null string, then the sign will continue to display whatever slots it is currently displaying. 
 
 =item
-B<packetdelay>: An amount of time, in seconds, to wait, between sending packets to the sign.  The default is 0.2, and seems to work well.  If you see "XX" on your sign while sending data, increasing this value may help. Must be greater than zero.  For reference, each text message generates 3 packets, and each 16x32 portion of an image sends one packet.  There's also an additional, short, packet sent after all message and image packets are delivered. So, if you make packetdelay a large number...and have lots of text and/or images, you may be waiting a while to send all the data.
+B<baudrate>:
+defaults to 38400, no real reason to use something other than the default, but it's there if you feel the need.  Must be a value that Device::Serialport or Win32::Serialport thinks is valid
+
+=item
+B<packetdelay>: An amount of time, in seconds, to wait, between sending packets to the sign.  The default is 0.20.  If you see "XX" displayed on your sign while sending data, increasing this value may help.  Must be greater than zero.
+
+=over
+
+=item
+B<Note>: For reference, each text message generates 3 packets, and each 16x32 portion of an image sends one packet.  There's also an additional, short, packet sent after all message and image packets are delivered. So, if you make packetdelay a large number...and have lots of text and/or images, you may be waiting a while to send all the data. Similarly, you may get some milage out of using a number smaller than the default, provided you don't see 'XX' displayed on the sign while sending.
 
 =back
+
+=back
+
+Examples of using $sign->send
 
   # typical use on a windows machine
   $sign->send(
@@ -1414,6 +1488,17 @@ Note that if you have multiple connected signs, you can send to them without cre
   #   pictures and icons...you'll have to create a new
   #   sign object with devicetype "badge" for them to render correctly
   $sign->send(device => "COM7"); 
+ 
+Using the showslots parameter. Also see the "slot" parameter under L<< /"$sign->addMsg" >>.
+
+
+  #
+  # showslots is a string, with the numbers of the messages you want
+  # displayed separated by commas
+  #
+  $sign->send(device => "/dev/ttyUSB0",
+              showslots => "1,5,7"
+  ); 
 
 =head1 AUTHOR
 
@@ -1421,16 +1506,22 @@ Kerry Schwab, C<< <sales at brightledsigns.com> >>
 
 =head1 SUPPORT
 
- You can find documentation for this module with the perldoc command.
+You can find documentation for this module with the perldoc command.
   
-   perldoc Device::MiniSign
+  perldoc Device::MiniSign
   
- You can also look for information at:
+Other links that may be helpful:
 
 =over 
 
-=item * Our Website:
-L<http://www.brightledsigns.com/developers>
+=item *
+Our website: L<brightledsigns.com|http://www.brightledsigns.com/>
+
+=item *
+Our L<page for developers|http://www.brightledsigns.com/developers>
+
+=item *
+The signs that work with this api are L<here|http://www.brightledsigns.com/scrolling-led-signs.html>.  They are the first three shown, the badge, the "micro sign" and the "mini sign".
 
 =back
  
@@ -1441,21 +1532,47 @@ C<bug-device-miniled at rt.cpan.org>, or through the web interface at
 L<http://rt.cpan.org>.  I will be notified, and then you'll automatically be
 notified of progress on your bug as I make changes.
 
-=head1 ACKNOWLEDGEMENTS
+=head1 TODO
 
-Inspiration from similar work:
+=over
 
-=over 4
+=item
+B<Font Upload>: The signs only natively support one line of text, but they do support uploading and replacing the native font.  The native font that comes with the sign is 12 pixels tall, I suppose to allow for the effect that outlines the text in a box.  A 15 or 16 pixel font, however, would be much more visible.
 
-=item L<http://zunkworks.com/ProgrammableLEDNameBadges> - Some code samples for different types of LED badges
+=item
+B<Emulating 2 lines of text>:  If we provided a way to render smaller fonts, like a standard 5x7 LED font, into a pixmap, you could present two lines of text on the sign, abeit, only as a picture via addPix.
 
-=item L<https://github.com/ajesler/ledbadge-rb> - Python library that appears to be targeting signs with a very similar protocol. 
+=item
+B<Migration of this code to a more generic module>: Need a better module structure that supports other models of LED signs that use a different protocol.  Like LEDSign::Mini  LEDSign:OtherModel, etc.
 
-=item L<http://search.cpan.org/~mspencer/ProLite-0.01/ProLite.pm> - The only other CPAN perl module I could find that does something similar, albeit for a different type of sign.
+=item
+B<Porting this to python>:  I'm much better with Perl, but it's not as popular as it used to be.  Porting to python might open up a wider user base for the signs.
 
 =back
 
+=head1 ACKNOWLEDGEMENTS
 
+I was able to leverage some existing work I found, though none of these examples reverse engineered the protocol to the same degree that we've done in this API. Here's what I found:
+
+=over 4
+
+=item * L<http://zunkworks.com/ProgrammableLEDNameBadges> - Some code samples for different types of LED badges. The last one, "Badge Three", uses the same protocol we're targeting here.
+
+=item * L<https://github.com/ajesler/ledbadge-rb> - Ruby library that appears to be targeting led badges with a very similar protocol. 
+
+=item * L<https://github.com/danzel/CodemaniaBadge> - A game, written in C#, that uses LED badges.  Also has some protocol information and C# code.  Targeting the same type of signs/badges.
+
+=item * L<https://github.com/ghewgill/ledbadge> - Python code, again, using the same protocol. 
+
+=back
+
+Other Cpan modules related to Led Signs
+
+=over
+
+=item * L<http://search.cpan.org/~mspencer/ProLite-0.01/ProLite.pm> - The only other CPAN perl module I could find that does something similar, albeit for a different type of sign.
+
+=back
 
 =head1 LICENSE AND COPYRIGHT
 

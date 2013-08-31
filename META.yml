@@ -16,20 +16,20 @@ name: Device-MiniLED
 provides:
   Device::MiniLED:
     file: lib/Device/MiniLED.pm
-    version: 1.02
+    version: 1.03
   Device::MiniLED::Clipart:
+    file: lib/Device/MiniLED.pm
+    version: 0
+  Device::MiniLED::Factory:
     file: lib/Device/MiniLED.pm
     version: 0
   Device::MiniLED::Icon:
     file: lib/Device/MiniLED.pm
     version: 0
-  Device::MiniLED::ImageFactory:
+  Device::MiniLED::Image:
     file: lib/Device/MiniLED.pm
     version: 0
   Device::MiniLED::Msg:
-    file: lib/Device/MiniLED.pm
-    version: 0
-  Device::MiniLED::MsgFactory:
     file: lib/Device/MiniLED.pm
     version: 0
   Device::MiniLED::Pixmap:
@@ -44,4 +44,4 @@ requires:
   POSIX: 0
 resources:
   license: http://www.perlfoundation.org/artistic_license_2_0
-version: 1.02
+version: 1.03
